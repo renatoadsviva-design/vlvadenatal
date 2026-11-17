@@ -1,6 +1,16 @@
 import { timingSafeEqual } from 'node:crypto';
-const url=process.env.UPSTASH_REDIS_REST_URL;
-const token=process.env.UPSTASH_REDIS_REST_TOKEN;
+// Aceita tanto as variáveis manuais quanto as criadas pela integração Vercel/Upstash.
+const candidates = [
+ [process.env.UPSTASH_REDIS_REST_URL, process.env.UPSTASH_REDIS_REST_TOKEN, 'UPSTASH'],
+ [process.env.KV_REST_API_URL, process.env.KV_REST_API_TOKEN, 'KV']
+];
+const validPair = candidates.find(([u,t]) => {
+ try { const parsed = new URL((u || '').trim()); return parsed.protocol === 'https:' && !!t?.trim(); }
+ catch { return false; }
+});
+const url = validPair?.[0]?.trim();
+const token = validPair?.[1]?.trim();
+const redisSource = validPair?.[2] || 'missing';
 // Fichas e índices históricos não expiram automaticamente.
 const TTL=60*60*24*90;
 const ID_RE=/^[-\w]{5,128}$/;
@@ -14,8 +24,8 @@ function authorized(req){
 }
 async function redis(...args){
  const r=await fetch(url,{method:'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},body:JSON.stringify(args)});
- if(!r.ok)throw new Error('Falha no armazenamento');
- const j=await r.json();if(j.error)throw new Error('Falha no armazenamento');return j.result;
+ if(!r.ok)throw new Error(`Redis HTTP ${r.status}`);
+ const j=await r.json();if(j.error)throw new Error(`Redis command: ${String(j.error).slice(0,160)}`);return j.result;
 }
 async function getFicha(id){
  const data=await redis('GET',`ficha:${id}`);
@@ -66,7 +76,7 @@ async function pagoNoGateway(id){
 
 export default async function handler(req,res){
  res.setHeader('Cache-Control','no-store');
- if(!url||!token)return res.status(503).json({error:'Configure UPSTASH_REDIS_REST_URL e UPSTASH_REDIS_REST_TOKEN na Vercel'});
+ if(!url||!token)return res.status(503).json({error:'Redis não configurado: confira o par URL/TOKEN do Upstash ou KV no ambiente do deployment'});
  try{
   if(req.method==='POST'&&req.body?.action==='import'){
    if(!authorized(req))return res.status(401).json({error:'Não autorizado'});
@@ -167,5 +177,5 @@ export default async function handler(req,res){
    return res.status(200).json({ok:true});
   }
   return res.status(405).json({error:'Método não permitido'});
- }catch(e){return res.status(500).json({error:'Erro ao processar ficha'});}
+ }catch(e){console.error('[api/fichas] Falha Redis', {source:redisSource, message:e?.message||'Erro desconhecido'});return res.status(500).json({error:'Falha ao acessar o banco de fichas. Confira os logs da função na Vercel.'});}
 }
